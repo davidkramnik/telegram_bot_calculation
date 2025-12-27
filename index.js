@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { Bot, Keyboard } from "grammy";
+import { Bot, Keyboard, InlineKeyboard } from "grammy";
 import { MongoClient } from "mongodb";
 import fs from "node:fs/promises";
 import path from "node:path";
