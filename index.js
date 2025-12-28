@@ -1,28 +1,29 @@
 import "dotenv/config";
-import { Bot, Keyboard, InlineKeyboard } from "grammy";
+import { Bot, Keyboard, InputFile } from "grammy";
 import { MongoClient } from "mongodb";
+import { chromium } from "playwright";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-const LOG_DIR = path.join(process.cwd(), "logs");
-const LOG_PATH = path.join(LOG_DIR, "attendance-log.jsonl");
-const ALLOW_PLAIN_CODES = process.env.ALLOW_PLAIN_CODES !== "false";
-const REQUIRE_MENTION = process.env.REQUIRE_MENTION === "true";
 const TIMEZONE = process.env.TIMEZONE || "UTC";
 const MONGO_URI = process.env.MONGO_URI;
-const MONGO_DB = process.env.MONGO_DB || "attendance_bot";
+const MONGO_DB = process.env.MONGO_DB || "calculation_bot";
 
 const bot = new Bot(process.env.BOT_TOKEN);
 
 let botUsername = "";
-let botId = 0;
-const chatDeletePermissions = new Map();
-let attendanceCollections = { client: null, db: null, events: null, sessions: null };
+let calculationCollections = {
+  client: null,
+  db: null,
+  balances: null,
+  balanceEvents: null,
+  balanceAdmins: null,
+};
+const pdfDateRequests = new Map();
 bot.api
   .getMe()
   .then((me) => {
     botUsername = me.username ?? "";
-    botId = me.id;
     console.log(`Bot username: ${botUsername}`);
   })
   .catch((err) => {
@@ -62,11 +63,14 @@ bot.command("help", async (ctx) => {
 `Commands:
 - /result <number>     (example: /result 21)
 - /menu                (interactive buttons)
-- /attendance          (buttons for check in/out/breaks)
-- /report              (today + week summary)
+- /calculation          (show report buttons)
+- /report              (full report)
+- /setbalanceadmin      (assign who can use + / - balance)
+- /pdf                  (PDF by date, DDMMYYYY)
 - /ping
-- Attendance in group: send 1 ✅, 0 ☑️, wc 🚾, mb 🍽️, f 🛍, l ❌, or h 🏥
-- wc/mb act as start/stop toggles for breaks`
+- Balance update: /balance +number or /balance -number (example: /balance +10000)
+- Buttons: View Report shows last 6 entries; View Report (PDF) sends full report
+`
   );
 });
 
@@ -118,49 +122,13 @@ bot.callbackQuery("help", async (ctx) => {
   await ctx.reply("Try /result 21 or /menu");
 });
 
-// Attendance
-const attendanceLabels = {
-  "1": "Check-In ✅",
-  "0": "Check-Out ☑️",
-  wc: "Break / Restroom 🚾",
-  mb: "Meal Break 🍽️",
-  f: "Outside for Food 🛍",
-  l: "Official Leave ❌",
-  h: "Medical / Hospital 🏥",
-};
-const attendanceCodes = new Set(Object.keys(attendanceLabels));
-const breakCodes = new Set(["wc", "mb", "f"]);
-let activeSessions = new Map();
-
 const replyKeyboard = new Keyboard()
-  .text("Check-In ✅")
-  .text("Check-Out ☑️")
+  .text("View Report")
+  .text("📄 View Report (PDF)")
   .row()
-  .text("Restroom 🚾")
-  .text("Meal 🍽️")
-  .row()
-  .text("Food Outside 🛍")
-  .text("Official Leave ❌")
-  .row()
-  .text("Hospital 🏥")
+  .text("Report PDF by Date")
   .resized()
   .persistent();
-
-const keyboardTextToCode = new Map([
-  ["Check-In ✅", "1"],
-  ["Check-Out ☑️", "0"],
-  ["Restroom 🚾", "wc"],
-  ["Meal 🍽️", "mb"],
-  ["Food Outside 🛍", "f"],
-  ["Official Leave ❌", "l"],
-  ["Hospital 🏥", "h"],
-]);
-
-function isBotMentioned(text = "") {
-  if (!REQUIRE_MENTION) return true;
-  if (!botUsername) return false;
-  return text.includes(`@${botUsername}`);
-}
 
 function mentionUser(ctx) {
   if (ctx.from?.username) return `@${ctx.from.username}`;
@@ -168,573 +136,603 @@ function mentionUser(ctx) {
   return name || "User";
 }
 
-async function canDeleteInChat(ctx) {
-  const chatId = ctx.chat?.id;
-  if (!chatId || !botId) return false;
-  if (chatDeletePermissions.has(chatId)) return chatDeletePermissions.get(chatId);
-  try {
-    const member = await ctx.api.getChatMember(chatId, botId);
-    const can =
-      member.status === "creator" ||
-      (member.status === "administrator" && member.can_delete_messages !== false);
-    chatDeletePermissions.set(chatId, can);
-    return can;
-  } catch (err) {
-    console.warn("Could not check delete permission", err);
-    chatDeletePermissions.set(chatId, false);
-    return false;
-  }
-}
-
 async function ensureDb() {
-  if (attendanceCollections.events) return attendanceCollections;
+  if (calculationCollections.balanceEvents) return calculationCollections;
   if (!MONGO_URI) {
     throw new Error("MONGO_URI is not set. Please set it in .env");
   }
   const client = new MongoClient(MONGO_URI);
   await client.connect();
   const db = client.db(MONGO_DB);
-  attendanceCollections = {
+  calculationCollections = {
     client,
     db,
-    events: db.collection("attendance_events"),
-    sessions: db.collection("active_sessions"),
+    balances: db.collection("user_balances"),
+    balanceEvents: db.collection("balance_events"),
+    balanceAdmins: db.collection("balance_admins"),
   };
-  await attendanceCollections.events.createIndex({ timestamp: 1 });
-  await attendanceCollections.events.createIndex({ user_id: 1 });
-  await attendanceCollections.sessions.createIndex({ user_id: 1 });
-  return attendanceCollections;
-}
-
-async function logAttendance(event) {
-  // Optional local backup log
-  try {
-    await fs.mkdir(LOG_DIR, { recursive: true });
-    await fs.appendFile(LOG_PATH, JSON.stringify(event) + "\n", "utf8");
-  } catch (err) {
-    console.warn("Could not write local log", err);
-  }
-
-  const { events } = await ensureDb();
-  const doc = {
-    ...event,
-    timestamp: new Date(event.timestamp),
-    start: event.start ? new Date(event.start) : undefined,
-    end: event.end ? new Date(event.end) : undefined,
-  };
-  await events.insertOne(doc);
-}
-
-async function fetchEventsSince(since) {
-  const { events } = await ensureDb();
-  const query = since ? { timestamp: { $gte: since } } : {};
-  const docs = await events.find(query).toArray();
-  return docs.map((d) => ({
-    ...d,
-    timestamp: d.timestamp instanceof Date ? d.timestamp.toISOString() : d.timestamp,
-    start: d.start instanceof Date ? d.start.toISOString() : d.start,
-    end: d.end instanceof Date ? d.end.toISOString() : d.end,
-  }));
-}
-
-function nowInTimezone() {
-  return new Date(new Date().toLocaleString("en-US", { timeZone: TIMEZONE }));
-}
-
-function startOfToday() {
-  const d = nowInTimezone();
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-function startOfWeek() {
-  const d = nowInTimezone();
-  const day = d.getDay(); // 0 = Sun
-  const diff = (day + 6) % 7; // days since Monday
-  d.setDate(d.getDate() - diff);
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-function startOfMonth() {
-  const d = nowInTimezone();
-  d.setDate(1);
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-function summarize(events, since) {
-  const filtered = events.filter((e) => {
-    const d = new Date(e.timestamp);
-    return !Number.isNaN(d.getTime()) && d >= since;
-  });
-  const perUser = new Map();
-
-  for (const event of filtered) {
-    const key = event.user_id ?? event.username ?? "unknown";
-    if (!perUser.has(key)) {
-      perUser.set(key, {
-        name: event.name,
-        username: event.username,
-        user_id: event.user_id,
-        counts: { "1": 0, "0": 0, wc: 0, mb: 0, f: 0, l: 0, h: 0 },
-        durations: { wc: 0, mb: 0, f: 0 },
-        last: event.timestamp,
-      });
-    }
-    const entry = perUser.get(key);
-    if (attendanceCodes.has(event.code)) {
-      entry.counts[event.code] += 1;
-    }
-    if (breakCodes.has(event.code) && Number.isFinite(event.duration_ms)) {
-      entry.durations[event.code] += event.duration_ms;
-    }
-    entry.last = event.timestamp;
-  }
-
-  return { total: filtered.length, perUser };
-}
-
-function formatUserLine(entry) {
-  const who = entry.name?.trim() || entry.username || entry.user_id || "unknown";
-  const counts = entry.counts;
-  const parts = [];
-  if (counts["1"]) parts.push(`in:${counts["1"]}`);
-  if (counts["0"]) parts.push(`out:${counts["0"]}`);
-  if (counts.wc) parts.push(`wc:${counts.wc}`);
-  if (counts.mb) parts.push(`mb:${counts.mb}`);
-  if (counts.f) parts.push(`food:${counts.f}`);
-  if (counts.l) parts.push(`leave:${counts.l}`);
-  if (counts.h) parts.push(`hospital:${counts.h}`);
-  const wcDur = entry.durations?.wc || 0;
-  const mbDur = entry.durations?.mb || 0;
-  const fDur = entry.durations?.f || 0;
-  if (wcDur) parts.push(`wc⏱${formatDuration(wcDur)}`);
-  if (mbDur) parts.push(`mb⏱${formatDuration(mbDur)}`);
-  if (fDur) parts.push(`food⏱${formatDuration(fDur)}`);
-  const bucket = parts.length ? parts.join(" ") : "no actions";
-  const last = entry.last ? `last ${formatTimestamp(entry.last)}` : "no time";
-  return `- ${who}: ${bucket} (${last})`;
-}
-
-function formatSummary(title, summary) {
-  if (summary.total === 0) return `${title}: no records yet.`;
-  const lines = [`${title}: ${summary.total} records`];
-  for (const entry of summary.perUser.values()) {
-    lines.push(formatUserLine(entry));
-  }
-  return lines.join("\n");
-}
-
-function formatActiveSessions() {
-  if (!activeSessions.size) return "Active breaks: none.";
-  const lines = ["Active breaks:"];
-  for (const [uid, session] of activeSessions.entries()) {
-    const who = session.name?.trim() || session.username || uid;
-    const label = attendanceLabels[session.type] || session.type;
-    lines.push(`- ${who}: ${label} since ${formatTimestamp(session.start)}`);
-  }
-  return lines.join("\n");
-}
-
-async function buildTodayReportForUser(uid) {
-  const events = await fetchEventsSince(startOfToday());
-  const userEvents = events
-    .filter((e) => String(e.user_id) === String(uid))
-    .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-  if (userEvents.length === 0) return null;
-
-  const checkIns = userEvents.filter((e) => e.code === "1");
-  const checkOuts = userEvents.filter((e) => e.code === "0");
-  const firstIn = checkIns.length ? new Date(checkIns[0].timestamp) : null;
-  const lastOut = checkOuts.length ? new Date(checkOuts[checkOuts.length - 1].timestamp) : null;
-  const workingMs = firstIn && lastOut ? lastOut - firstIn : 0;
-
-  const counts = { wc: 0, mb: 0, f: 0 };
-  const durations = { wc: 0, mb: 0, f: 0 };
-  for (const e of userEvents) {
-    if (counts[e.code] !== undefined) counts[e.code] += 1;
-    if (breakCodes.has(e.code) && Number.isFinite(e.duration_ms)) {
-      durations[e.code] += e.duration_ms;
-    }
-  }
-
-  return {
-    firstIn,
-    lastOut,
-    workingMs,
-    counts,
-    durations,
-  };
-}
-
-async function buildMonthReportForUser(uid) {
-  const events = await fetchEventsSince(startOfMonth());
-  const userEvents = events
-    .filter((e) => String(e.user_id) === String(uid))
-    .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-  if (userEvents.length === 0) return null;
-
-  const hospitalDates = [];
-  const leaveDates = [];
-  for (const e of userEvents) {
-    if (e.code === "h") hospitalDates.push(formatDateShort(e.timestamp));
-    if (e.code === "l") leaveDates.push(formatDateShort(e.timestamp));
-  }
-
-  return {
-    hospitalDates,
-    leaveDates,
-  };
-}
-
-function formatTimestamp(ts) {
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return ts;
-  const fmt = new Intl.DateTimeFormat("en-CA", {
-    timeZone: TIMEZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
-  return fmt.format(d).replace(",", "");
-}
-
-function formatDuration(ms) {
-  if (!Number.isFinite(ms) || ms < 0) return "?";
-  const totalSeconds = Math.round(ms / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  const parts = [];
-  if (hours) parts.push(`${hours}h`);
-  if (minutes) parts.push(`${minutes}m`);
-  if (!hours && !minutes) parts.push(`${seconds}s`);
-  return parts.join(" ");
-}
-
-function formatDurationLong(ms) {
-  if (!Number.isFinite(ms) || ms < 0) return "?";
-  const totalMinutes = Math.round(ms / 60000);
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  const hPart = hours ? `${hours} hour${hours === 1 ? "" : "s"}` : "";
-  const mPart = `${minutes} minute${minutes === 1 ? "" : "s"}`;
-  return [hPart, mPart].filter(Boolean).join(" ").trim();
-}
-
-function formatDateShort(ts) {
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return ts;
-  const fmt = new Intl.DateTimeFormat("en-CA", {
-    timeZone: TIMEZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-  return fmt.format(d);
-}
-
-async function loadActiveSessions() {
-  try {
-    const { sessions } = await ensureDb();
-    const docs = await sessions.find({}).toArray();
-    activeSessions = new Map(
-      docs.map((d) => [
-        String(d.user_id),
-        {
-          type: d.type,
-          start: d.start instanceof Date ? d.start.toISOString() : d.start,
-          name: d.name,
-          username: d.username,
-          chat_id: d.chat_id,
-        },
-      ])
-    );
-  } catch (err) {
-    console.error("Failed to load active sessions from Mongo", err);
-    activeSessions = new Map();
-  }
-}
-
-async function upsertActiveSession(uid, session) {
-  const { sessions } = await ensureDb();
-  await sessions.updateOne(
-    { user_id: uid },
-    {
-      $set: {
-        user_id: uid,
-        type: session.type,
-        start: new Date(session.start),
-        name: session.name,
-        username: session.username,
-        chat_id: session.chat_id,
-      },
-    },
-    { upsert: true }
+  await calculationCollections.balances.createIndex(
+    { chat_id: 1, user_id: 1 },
+    { unique: true }
   );
+  await calculationCollections.balanceEvents.createIndex({ chat_id: 1, timestamp: 1 });
+  await calculationCollections.balanceEvents.createIndex({ user_id: 1, timestamp: 1 });
+  await calculationCollections.balanceAdmins.createIndex({ chat_id: 1 }, { unique: true });
+  return calculationCollections;
 }
 
-async function deleteActiveSession(uid) {
-  const { sessions } = await ensureDb();
-  await sessions.deleteOne({ user_id: uid });
+function formatTime(ts) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  const hours = String(d.getHours()).padStart(2, "0");
+  const minutes = String(d.getMinutes()).padStart(2, "0");
+  const seconds = String(d.getSeconds()).padStart(2, "0");
+  return `${hours}:${minutes}:${seconds}`;
 }
 
-async function logBreakInterval({ code, label, start, end, duration_ms, ctx, via }) {
-  const event = {
-    timestamp: end,
-    code,
-    label,
+function formatAmount(n) {
+  const num = Number(n);
+  if (Number.isNaN(num)) return "0";
+  return Number.isInteger(num) ? String(num) : num.toFixed(2);
+}
+
+function formatAmountWithCommas(n) {
+  const num = Number(n);
+  if (Number.isNaN(num)) return "0";
+  const formatter = new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: Number.isInteger(num) ? 0 : 2,
+    maximumFractionDigits: 2,
+  });
+  return formatter.format(num);
+}
+
+function displayMemberId(event) {
+  if (event.username) return event.username;
+  if (event.user_id) return String(event.user_id);
+  return "unknown";
+}
+
+function formatSignedAmount(n) {
+  const num = Number(n);
+  const sign = num >= 0 ? "+" : "-";
+  const abs = Math.abs(num);
+  const body = Number.isInteger(abs) ? String(abs) : abs.toFixed(2);
+  return `${sign}${body}`;
+}
+
+function formatSignedAmountWithCommas(n) {
+  const num = Number(n);
+  const sign = num >= 0 ? "+" : "-";
+  return `${sign}${formatAmountWithCommas(Math.abs(num))}`;
+}
+
+function formatDateDMY(ts) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  const day = String(d.getDate()).padStart(2, "0");
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const year = d.getFullYear();
+  return `${day}/${month}/${year}`;
+}
+
+function parseDDMMYYYY(value) {
+  const match = value.match(/^(\d{2})(\d{2})(\d{4})$/);
+  if (!match) return null;
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const year = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const test = new Date(year, month - 1, day);
+  if (
+    test.getFullYear() !== year ||
+    test.getMonth() !== month - 1 ||
+    test.getDate() !== day
+  ) {
+    return null;
+  }
+  return { day, month, year };
+}
+
+function dateInTimezone(year, month, day) {
+  const utcDate = new Date(Date.UTC(year, month - 1, day, 0, 0, 0));
+  return new Date(utcDate.toLocaleString("en-US", { timeZone: TIMEZONE }));
+}
+
+function buildDateRangeFromDDMMYYYY(value) {
+  const parsed = parseDDMMYYYY(value);
+  if (!parsed) return null;
+  const start = dateInTimezone(parsed.year, parsed.month, parsed.day);
+  const end = dateInTimezone(parsed.year, parsed.month, parsed.day + 1);
+  return {
     start,
     end,
-    duration_ms,
-    user_id: ctx.from?.id,
-    username: ctx.from?.username,
-    name: `${ctx.from?.first_name ?? ""} ${ctx.from?.last_name ?? ""}`.trim(),
-    chat_id: ctx.chat?.id,
-    chat_title: ctx.chat?.title,
-    message_id: ctx.message?.message_id ?? ctx.callbackQuery?.message?.message_id,
-    via,
-  };
-  await logAttendance(event);
-  return event;
-}
-
-function endActiveSession(session) {
-  const end = new Date();
-  const startDate = new Date(session.start);
-  const duration_ms = end - startDate;
-  return {
-    start: session.start,
-    end: end.toISOString(),
-    duration_ms,
-    code: session.type,
-    label: attendanceLabels[session.type] || session.type,
+    label: `${parsed.day}${String(parsed.month).padStart(2, "0")}${parsed.year}`,
   };
 }
 
-async function closeSession(uid, ctx, via) {
-  const session = activeSessions.get(uid);
-  if (!session) return null;
-  const closed = endActiveSession(session);
+async function fetchBalanceEvents(chatId, { start, end } = {}) {
+  const { balanceEvents } = await ensureDb();
+  const query = { chat_id: chatId };
+  if (start || end) {
+    query.timestamp = {};
+    if (start) query.timestamp.$gte = start;
+    if (end) query.timestamp.$lt = end;
+  }
+  return balanceEvents.find(query).sort({ timestamp: 1 }).toArray();
+}
+
+function padRight(value, width) {
+  const text = String(value);
+  if (text.length >= width) return text.slice(0, width);
+  return text.padEnd(width, " ");
+}
+
+function buildReportEntryLineText(event) {
+  const member = padRight(displayMemberId(event), 9);
+  return `${member} ⏱️ ${formatTime(event.timestamp)}  ${formatSignedAmountWithCommas(
+    event.delta
+  )}`;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+async function buildPdfHtml(events) {
+  const total = events.reduce((sum, e) => sum + (Number(e.delta) || 0), 0);
+  const reportDate = formatDateDMY(new Date());
+  const logoPath = path.join(process.cwd(), "backgroundlogo.jpg");
+  const rows = events
+    .map((e) => {
+      const member = escapeHtml(displayMemberId(e));
+      const time = escapeHtml(formatTime(e.timestamp));
+      const amount = formatSignedAmountWithCommas(e.delta);
+      const amountClass = amount.startsWith("+") ? "pos" : "neg";
+      return `<div class="row"><span class="member">${member}</span><span class="time">⏱️ ${time}</span><span class="amount ${amountClass}">${escapeHtml(amount)}</span></div>`;
+    })
+    .join("");
+
+  const perMember = new Map();
+  for (const e of events) {
+    const key = displayMemberId(e);
+    if (!perMember.has(key)) {
+      perMember.set(key, { entries: 0, total: 0 });
+    }
+    const entry = perMember.get(key);
+    entry.entries += 1;
+    entry.total += Number(e.delta) || 0;
+  }
+  const memberBlocks = Array.from(perMember.entries())
+    .map(([member, stats], idx) => {
+      const name = escapeHtml(member);
+      return `<div class="member-block">
+  <div class="member-title">${idx + 1}. ${name}</div>
+  <div>Total entries : ${stats.entries}</div>
+  <div>Total amount : ${escapeHtml(formatAmountWithCommas(stats.total))}</div>
+</div>`;
+    })
+    .join("");
+
+  const emojiFontPath = path.join(process.cwd(), "fonts", "NotoColorEmoji-Regular.ttf");
+  const emojiFontCss = `@font-face { font-family: "NotoColorEmoji"; src: url("file://${emojiFontPath}"); }`;
+
+  let logoDataUri = "";
   try {
-    await logBreakInterval({ ...closed, ctx, via });
-  } catch (err) {
-    console.error("Failed to log break interval", err);
+    const logoBuffer = await fs.readFile(logoPath);
+    logoDataUri = `data:image/jpeg;base64,${logoBuffer.toString("base64")}`;
+  } catch {
+    logoDataUri = "";
   }
-  activeSessions.delete(uid);
-  await deleteActiveSession(uid);
-  return closed;
+
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      ${emojiFontCss}
+      body {
+        font-family: "Courier New", Courier, monospace;
+        font-size: 12px;
+        font-weight: 700;
+        margin: 24px;
+        color: #222;
+        background: #fff;
+      }
+      * {
+        font-weight: 700;
+      }
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background: ${logoDataUri ? `url("${logoDataUri}") center/80% no-repeat` : "none"};
+        opacity: 0.2;
+        z-index: -1;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 120px 120px 120px;
+        column-gap: 12px;
+        line-height: 1.3;
+      }
+      .member {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .time {
+        white-space: nowrap;
+      }
+      .amount {
+        text-align: right;
+      }
+      .pos { color: #1b7f2a; }
+      .neg { color: #b3261e; }
+      .separator {
+        border-top: 1px solid #444;
+        margin: 8px 0;
+      }
+      .title {
+        font-family: "NotoColorEmoji", "Courier New", monospace;
+        margin: 0 0 6px 0;
+      }
+      .date {
+        font-family: "NotoColorEmoji", "Courier New", monospace;
+        margin: 0 0 6px 0;
+      }
+      .total {
+        font-family: "NotoColorEmoji", "Courier New", monospace;
+        margin: 6px 0 12px 0;
+      }
+      .members-title {
+        font-family: "NotoColorEmoji", "Courier New", monospace;
+        margin: 10px 0 6px 0;
+      }
+      .member-block { margin: 6px 0 10px 0; }
+    </style>
+  </head>
+  <body>
+    <div class="title">📊 TRANSACTION LOG</div>
+    <div class="date">📅 ${escapeHtml(reportDate)}</div>
+    <div class="separator"></div>
+    ${rows}
+    <div class="separator"></div>
+    <div class="total">💵 TOTAL: ${escapeHtml(formatAmountWithCommas(total))}</div>
+    <div class="members-title">👥 Members Daily report</div>
+    ${memberBlocks}
+  </body>
+</html>`;
 }
 
-async function handleAttendance(ctx, code, via) {
-  if (!ensureGroup(ctx)) return;
+async function renderReportPdf(events) {
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  const html = await buildPdfHtml(events);
+  await page.setContent(html, { waitUntil: "networkidle" });
+  const buffer = await page.pdf({ format: "A4", printBackground: true });
+  await browser.close();
+  return buffer;
+}
 
-  const text = ctx.message?.text ?? "";
-  if (via !== "button" && !isBotMentioned(text)) {
-    const mention = botUsername ? `@${botUsername}` : "the bot";
-    await ctx.reply(`Please mention ${mention} or use /attendance buttons.`);
-    return;
+
+function resolveBalanceTarget(ctx) {
+  const repliedUser = ctx.message?.reply_to_message?.from;
+  if (repliedUser?.id) {
+    return repliedUser;
   }
+  return ctx.from;
+}
 
-  const label = attendanceLabels[code];
-  const timestamp = new Date().toISOString();
-  const formattedTimestamp = formatTimestamp(timestamp);
-
-  // Auto-close any active break session on checkout so durations are captured
-  if (code === "0") {
-    const uid = ctx.from?.id ? String(ctx.from.id) : null;
-    if (uid && activeSessions.has(uid)) {
-      await closeSession(uid, ctx, via);
-    }
+async function updateUserBalance(ctx, delta, targetUser = ctx.from) {
+  const chatId = ctx.chat?.id;
+  const userId = targetUser?.id;
+  if (!chatId || !userId) {
+    throw new Error("Missing chat or user info.");
   }
-
-  // Toggle for break codes (wc/mb) to track durations
-  if (breakCodes.has(code)) {
-    const uid = ctx.from?.id ? String(ctx.from.id) : null;
-    if (!uid) {
-      await ctx.reply("Could not identify user.");
-      return;
-    }
-
-    const existing = activeSessions.get(uid);
-    if (existing && existing.type === code) {
-      const closed = await closeSession(uid, ctx, via);
-      const durationText = formatDuration(closed?.duration_ms ?? 0);
-      await ctx.reply(`${mentionUser(ctx)} ${label} ended. Duration: ${durationText}.`, {
-        reply_to_message_id: ctx.message?.message_id,
-      });
-      return;
-    }
-
-    // If another break is active, close it before starting the new one
-    if (existing && existing.type !== code) {
-      const closed = await closeSession(uid, ctx, via);
-      const durationText = formatDuration(closed?.duration_ms ?? 0);
-      await ctx.reply(
-        `${mentionUser(ctx)} ended ${
-          attendanceLabels[closed?.code] ?? closed?.code ?? "previous break"
-        } (${durationText}). Starting ${label} now.`,
-        { reply_to_message_id: ctx.message?.message_id }
-      );
-    } else {
-      const startMsg =
-        code === "f"
-          ? `${mentionUser(ctx)} Outside for Food 🛍 started! Send the same again to end and back to work.`
-          : code === "mb"
-          ? `${mentionUser(ctx)} Meal Break 🍽️ started! Send the same again to end and back to work.`
-          : `${mentionUser(ctx)} Break / Restroom 🚾 started! Send the same again to end and back to work.`;
-      await ctx.reply(startMsg, {
-        reply_to_message_id: ctx.message?.message_id,
-      });
-    }
-
-    activeSessions.set(uid, {
-      type: code,
-      start: timestamp,
-      name: `${ctx.from?.first_name ?? ""} ${ctx.from?.last_name ?? ""}`.trim(),
-      username: ctx.from?.username,
-      chat_id: ctx.chat?.id,
-    });
-    await upsertActiveSession(uid, activeSessions.get(uid));
-    return;
-  }
-
-  const event = {
-    timestamp,
-    code,
-    label,
-    user_id: ctx.from?.id,
-    username: ctx.from?.username,
-    name: `${ctx.from?.first_name ?? ""} ${ctx.from?.last_name ?? ""}`.trim(),
-    chat_id: ctx.chat?.id,
+  const { balances, balanceEvents } = await ensureDb();
+  const result = await balances.findOneAndUpdate(
+    { chat_id: chatId, user_id: userId },
+    {
+      $inc: { balance: delta },
+      $setOnInsert: {
+        chat_id: chatId,
+        user_id: userId,
+        username: targetUser?.username,
+        name: `${targetUser?.first_name ?? ""} ${targetUser?.last_name ?? ""}`.trim(),
+        created_at: new Date(),
+      },
+      $set: { updated_at: new Date() },
+    },
+    { upsert: true, returnDocument: "after" }
+  );
+  const updated = result.value;
+  await balanceEvents.insertOne({
+    chat_id: chatId,
     chat_title: ctx.chat?.title,
-    message_id: ctx.message?.message_id ?? ctx.callbackQuery?.message?.message_id,
-    via,
-  };
-
-  try {
-    await logAttendance(event);
-  } catch (err) {
-    console.error("Failed to log attendance", err);
-    await ctx.reply("Could not log right now. Please try again.");
-    return;
-  }
-
-  await ctx.reply(`${mentionUser(ctx)} ${label} noted at ${formattedTimestamp}`, {
-    reply_to_message_id: ctx.message?.message_id,
+    user_id: userId,
+    username: targetUser?.username,
+    name: `${targetUser?.first_name ?? ""} ${targetUser?.last_name ?? ""}`.trim(),
+    timestamp: new Date(),
+    delta,
+    balance: updated?.balance ?? delta,
+    updated_by: ctx.from?.id,
   });
-
-  // After check-out, send personal daily report
-  if (code === "0") {
-    const report = await buildTodayReportForUser(ctx.from?.id);
-    const month = await buildMonthReportForUser(ctx.from?.id);
-    if (report) {
-      const who =
-        ctx.from?.username ? `@${ctx.from.username}` : `${ctx.from?.first_name ?? "User"}`;
-      const hospitalDates = month?.hospitalDates ?? [];
-      const leaveDates = month?.leaveDates ?? [];
-      const hospitalList = hospitalDates.length
-        ? hospitalDates.map((d, i) => `${i + 1}. ${d}`).join(" ")
-        : "—";
-      const leaveList = leaveDates.length
-        ? leaveDates.map((d, i) => `${i + 1}. ${d}`).join(" ")
-        : "—";
-      const lines = [
-        `${who} today report:`,
-        `Check-in: ${report.firstIn ? formatTimestamp(report.firstIn) : "—"}`,
-        `Check-out: ${report.lastOut ? formatTimestamp(report.lastOut) : "—"}`,
-        `Working hours: ${report.workingMs ? formatDurationLong(report.workingMs) : "—"}`,
-        `Total wc: ${report.counts.wc} times, ${formatDurationLong(report.durations.wc)}`,
-        `Total food outside: ${report.counts.f} times, ${formatDurationLong(report.durations.f)}`,
-        `Total food: ${report.counts.mb} times, ${formatDurationLong(report.durations.mb)}`,
-        "",
-        `Total hospital this month: ${hospitalDates.length} times`,
-        `Date: ${hospitalList}`,
-        `Total leave this month: ${leaveDates.length} times`,
-        `Date: ${leaveList}`,
-      ];
-      await ctx.reply(lines.join("\n"), {
-        reply_to_message_id: ctx.message?.message_id,
-      });
-    }
-  }
+  return result.value;
 }
 
-// Plain text codes (can be turned off via ALLOW_PLAIN_CODES=false)
-bot.hears(/^(1|0|wc|mb|f|l|h)$/i, async (ctx) => {
-  if (!ALLOW_PLAIN_CODES) return;
-  const code = ctx.match[1].toLowerCase();
-  await handleAttendance(ctx, code, "text");
-});
+async function getBalanceAdmin(chatId) {
+  const { balanceAdmins } = await ensureDb();
+  return balanceAdmins.findOne({ chat_id: chatId });
+}
+
+async function ensureBalanceAdmin(ctx) {
+  const chatId = ctx.chat?.id;
+  const userId = ctx.from?.id;
+  if (!chatId || !userId) {
+    await ctx.reply("Missing chat or user info.");
+    return false;
+  }
+  const admin = await getBalanceAdmin(chatId);
+  if (!admin?.user_id) {
+    await ctx.reply("Balance admin not set. Use /setbalanceadmin as a chat admin.");
+    return false;
+  }
+  if (String(admin.user_id) !== String(userId)) {
+    const who = mentionUser(ctx);
+    await ctx.reply(`${who} Only the balance admin can update balances.`);
+    return false;
+  }
+  return true;
+}
 
 // Reply keyboard labels
-bot.hears(Array.from(keyboardTextToCode.keys()), async (ctx) => {
-  const code = keyboardTextToCode.get(ctx.message.text.trim());
-  if (!code) return;
-  await handleAttendance(ctx, code, "keyboard");
+function buildReportLines(events, { limit, entryFormatter, style = "pretty" } = {}) {
+  const total = events.reduce((sum, e) => sum + (Number(e.delta) || 0), 0);
+  const reportDate = formatDateDMY(new Date());
+  const displayEvents = limit ? events.slice(-limit) : events;
+  const formatEntry = entryFormatter || buildReportEntryLineText;
+  const separator = style === "pretty" ? "────────────────" : "----------";
+  const header = style === "pretty" ? "📊 TRANSACTION LOG" : "TRANSACTION LOG";
+  const dateLine = style === "pretty" ? `📅 ${reportDate}` : `Date: ${reportDate}`;
+  const totalLabel = style === "pretty" ? "💵 TOTAL:" : "TOTAL:";
+  const totalValue =
+    style === "pretty" ? formatAmountWithCommas(total) : formatAmount(total);
+  const lines = [header, "", dateLine, separator];
+  for (const e of displayEvents) {
+    lines.push(formatEntry(e));
+  }
+  lines.push(separator, `${totalLabel} ${totalValue}`);
+  return { lines, total };
+}
+
+async function sendReport(ctx, { limit, asPdf } = {}) {
+  if (!ensureGroup(ctx)) return;
+  const chatId = ctx.chat?.id;
+  const events = await fetchBalanceEvents(chatId);
+
+  const { lines } = buildReportLines(events, {
+    limit,
+    entryFormatter: buildReportEntryLineText,
+    style: "pretty",
+  });
+  if (asPdf) {
+    const buffer = await renderReportPdf(events);
+    await ctx.replyWithDocument(new InputFile(buffer, "report.pdf"));
+    return;
+  }
+  const text = lines.join("\n");
+  const html = `<pre><b>${escapeHtml(text)}</b></pre>`;
+  await ctx.reply(html, { reply_markup: replyKeyboard, parse_mode: "HTML" });
+}
+
+bot.hears(["View Report", "Vew Report", "🌐 Full Report"], async (ctx) => {
+  await sendReport(ctx, { limit: 6 });
 });
 
-bot.command("attendance", async (ctx) => {
+bot.hears(["📄 View Report (PDF)", "View Report (PDF)"], async (ctx) => {
+  await sendReport(ctx, { asPdf: true });
+});
+
+bot.hears("Report PDF by Date", async (ctx) => {
+  const chatId = ctx.chat?.id;
+  const userId = ctx.from?.id;
+  if (chatId && userId) {
+    pdfDateRequests.set(`${chatId}:${userId}`, Date.now());
+  }
+  await ctx.reply("Send the date as DDMMYYYY (example: 27122025)");
+});
+
+bot.on("message:text", async (ctx, next) => {
+  const chatId = ctx.chat?.id;
+  const userId = ctx.from?.id;
+  if (!chatId || !userId) return next();
+  const key = `${chatId}:${userId}`;
+  const requestedAt = pdfDateRequests.get(key);
+  if (!requestedAt) return next();
+  if (Date.now() - requestedAt > 5 * 60 * 1000) {
+    pdfDateRequests.delete(key);
+    return next();
+  }
+
+  const text = ctx.message.text.trim();
+  if (text.startsWith("/")) return next();
+  const range = buildDateRangeFromDDMMYYYY(text);
+  if (!range) {
+    await ctx.reply("Invalid date. Use DDMMYYYY (example: 27122025).");
+    return;
+  }
+  pdfDateRequests.delete(key);
+  const events = await fetchBalanceEvents(chatId, {
+    start: range.start,
+    end: range.end,
+  });
+  if (!events.length) {
+    await ctx.reply("No entries for that date.");
+    return;
+  }
+  const buffer = await renderReportPdf(events);
+  await ctx.replyWithDocument(new InputFile(buffer, `report-${range.label}.pdf`));
+});
+
+
+bot.command("calculation", async (ctx) => {
   if (!ensureGroup(ctx)) return;
-  await ctx.reply("Tap a button to log attendance:", {
+  await ctx.reply("Tap a button to view the report:", {
     reply_markup: replyKeyboard,
   });
 });
 
-// Friendly fallback for bad attendance codes
-bot.on("message:text", async (ctx, next) => {
-  const text = ctx.message.text.trim();
-  if (text.startsWith("/")) return next(); // let commands through
-  const code = text.toLowerCase();
-  if (attendanceCodes.has(code)) return next(); // already handled by hears
+bot.command("setbalanceadmin", async (ctx) => {
   if (!ensureGroup(ctx)) return;
+  const chatId = ctx.chat?.id;
+  const fromId = ctx.from?.id;
+  if (!chatId || !fromId) return;
 
-  const hint =
-    `${mentionUser(ctx)} Only attendance inputs are allowed here. Please use the buttons or send the short codes: 1 (Check-In ✅), 0 (Check-Out ☑️), wc (Restroom 🚾), mb (Meal 🍽️), f (Food Outside 🛍), l (Official Leave ❌), h (Hospital 🏥).`;
-  if (await canDeleteInChat(ctx)) {
-    try {
-      await ctx.deleteMessage();
-    } catch (err) {
-      console.warn("Could not delete message", err);
+  try {
+    const member = await ctx.api.getChatMember(chatId, fromId);
+    const isAdmin =
+      member.status === "creator" || member.status === "administrator";
+    if (!isAdmin) {
+      await ctx.reply("Only chat admins can set the balance admin.");
+      return;
     }
-  }
-  await ctx.reply(hint, { reply_markup: replyKeyboard });
-});
-
-// Attendance report
-bot.command("report", async (ctx) => {
-  const sinceWeek = startOfWeek();
-  const events = await fetchEventsSince(sinceWeek);
-  if (events.length === 0) {
-    await ctx.reply("No attendance records yet.");
+  } catch (err) {
+    console.error("Failed to verify admin status", err);
+    await ctx.reply("Could not verify admin status. Please try again.");
     return;
   }
 
-  const today = summarize(events, startOfToday());
-  const week = summarize(events, sinceWeek);
+  let target = null;
+  if (ctx.message?.reply_to_message?.from?.id) {
+    target = ctx.message.reply_to_message.from;
+  } else if (ctx.message?.entities) {
+    const mention = ctx.message.entities.find((e) => e.type === "text_mention");
+    if (mention?.user) target = mention.user;
+  }
 
-  const text = [
-    formatSummary("Today", today),
-    "",
-    formatSummary("This week", week),
-    "",
-    formatActiveSessions(),
-    "",
-    `Timezone: ${TIMEZONE}`,
-  ].join("\n");
-  await ctx.reply(text);
+  const text = ctx.message?.text ?? "";
+  const arg = text.split(" ").slice(1).join(" ").trim();
+  const argId = arg && /^\d+$/.test(arg) ? Number(arg) : null;
+  const targetId = target?.id ?? argId;
+  if (!targetId) {
+    await ctx.reply("Reply to a user's message or use /setbalanceadmin <user_id>.");
+    return;
+  }
+
+  const { balanceAdmins } = await ensureDb();
+  await balanceAdmins.updateOne(
+    { chat_id: chatId },
+    {
+      $set: {
+        chat_id: chatId,
+        user_id: targetId,
+        username: target?.username,
+        name: `${target?.first_name ?? ""} ${target?.last_name ?? ""}`.trim(),
+        updated_at: new Date(),
+        updated_by: fromId,
+      },
+    },
+    { upsert: true }
+  );
+  await ctx.reply(`Balance admin set to ${target?.username ?? targetId}.`);
+});
+
+bot.command("pdf", async (ctx) => {
+  if (!ensureGroup(ctx)) return;
+  const text = ctx.message?.text ?? "";
+  const arg = text.split(" ").slice(1).join(" ").trim();
+  if (!arg) {
+    await ctx.reply("Usage: /pdf DDMMYYYY (example: /pdf 27122025)");
+    return;
+  }
+  const range = buildDateRangeFromDDMMYYYY(arg);
+  if (!range) {
+    await ctx.reply("Invalid date. Use DDMMYYYY (example: /pdf 27122025).");
+    return;
+  }
+  const chatId = ctx.chat?.id;
+  const events = await fetchBalanceEvents(chatId, {
+    start: range.start,
+    end: range.end,
+  });
+  if (!events.length) {
+    await ctx.reply("No entries for that date.");
+    return;
+  }
+  const buffer = await renderReportPdf(events);
+  await ctx.replyWithDocument(new InputFile(buffer, `report-${range.label}.pdf`));
+});
+
+bot.command("balance", async (ctx) => {
+  if (!ensureGroup(ctx)) return;
+  if (!(await ensureBalanceAdmin(ctx))) return;
+  const text = ctx.message?.text ?? "";
+  const arg = text.split(" ").slice(1).join(" ").trim();
+  if (!arg) {
+    await ctx.reply("Usage: /balance +number or /balance -number (example: /balance +10000)");
+    return;
+  }
+  const match = arg.match(/^([+-]\d+(?:\.\d+)?)$/);
+  if (!match) {
+    await ctx.reply("Please provide a signed number. Example: /balance +10000");
+    return;
+  }
+
+  const delta = Number(match[1]);
+  if (Number.isNaN(delta)) {
+    await ctx.reply("That number is not valid.");
+    return;
+  }
+
+  try {
+    const targetUser = resolveBalanceTarget(ctx);
+    await updateUserBalance(ctx, delta, targetUser);
+    await sendReport(ctx, { limit: 6 });
+  } catch (err) {
+    console.error("Failed to update balance", err);
+    await ctx.reply("Could not update balance right now. Please try again.");
+  }
+});
+
+// Balance adjustments: +number or -number (requires privacy mode disabled)
+bot.on("message:text", async (ctx, next) => {
+  const text = ctx.message.text.trim();
+  if (text.startsWith("/")) return next();
+  const cleaned = botUsername ? text.replace(`@${botUsername}`, "").trim() : text;
+  const match = cleaned.match(/^([+-]\d+(?:\.\d+)?)$/);
+  if (!match) return next();
+  if (!ensureGroup(ctx)) return;
+  if (!(await ensureBalanceAdmin(ctx))) return;
+
+  const delta = Number(match[1]);
+  if (Number.isNaN(delta)) return next();
+
+  try {
+    const targetUser = resolveBalanceTarget(ctx);
+    await updateUserBalance(ctx, delta, targetUser);
+    await sendReport(ctx, { limit: 6 });
+  } catch (err) {
+    console.error("Failed to update balance", err);
+    await ctx.reply("Could not update balance right now. Please try again.");
+  }
+});
+
+// Free text is allowed; keep only explicit commands and handlers.
+
+// Calculation report
+bot.command("report", async (ctx) => {
+  await sendReport(ctx);
 });
 
 // Start polling
 (async () => {
   try {
     await ensureDb();
-    await loadActiveSessions();
     bot.start();
     console.log("Bot running (polling)...");
   } catch (err) {

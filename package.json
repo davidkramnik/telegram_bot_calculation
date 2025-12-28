@@ -1,5 +1,5 @@
 {
-  "name": "attendance",
+  "name": "calculation",
   "version": "1.0.0",
   "description": "",
   "type": "module",
@@ -13,6 +13,7 @@
   "dependencies": {
     "dotenv": "^17.2.3",
     "grammy": "^1.38.4",
-    "mongodb": "^6.6.2"
+    "mongodb": "^6.6.2",
+    "playwright": "^1.49.1"
   }
 }
