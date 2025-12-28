@@ -126,7 +126,7 @@ const replyKeyboard = new Keyboard()
   .text("View Report")
   .text("📄 View Report (PDF)")
   .row()
-  .text("Report PDF by Date")
+  .text("📄 Report PDF by Date")
   .resized()
   .persistent();
 
@@ -538,7 +538,7 @@ bot.hears(["📄 View Report (PDF)", "View Report (PDF)"], async (ctx) => {
   await sendReport(ctx, { asPdf: true });
 });
 
-bot.hears("Report PDF by Date", async (ctx) => {
+bot.hears("📄 Report PDF by Date", async (ctx) => {
   const chatId = ctx.chat?.id;
   const userId = ctx.from?.id;
   if (chatId && userId) {
