@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { Bot, Keyboard, InputFile } from "grammy";
+import { Bot, Keyboard, InlineKeyboard, InputFile } from "grammy";
 import { MongoClient } from "mongodb";
 import { chromium } from "playwright";
 import fs from "node:fs/promises";
@@ -46,7 +46,7 @@ bot.catch((err) => {
 function ensureGroup(ctx) {
   const type = ctx.chat?.type;
   if (type === "private") {
-    ctx.reply("Please use this command in a group 🙂");
+    ctx.reply(withMention(ctx, "Please use this command in a group 🙂"));
     return false;
   }
   return true;
@@ -54,13 +54,13 @@ function ensureGroup(ctx) {
 
 // /start
 bot.command("start", async (ctx) => {
-  await ctx.reply("Hi! Try /help or /menu");
+  await ctx.reply(withMention(ctx, "Hi! Try /help or /menu"));
 });
 
 // /help
 bot.command("help", async (ctx) => {
   await ctx.reply(
-`Commands:
+withMention(ctx, `Commands:
 - /result <number>     (example: /result 21)
 - /menu                (interactive buttons)
 - /calculation          (show report buttons)
@@ -70,12 +70,12 @@ bot.command("help", async (ctx) => {
 - /ping
 - Balance update: /balance +number or /balance -number (example: /balance +10000)
 - Buttons: View Report shows last 6 entries; View Report (PDF) sends full report
-`
+`)
   );
 });
 
 // /ping
-bot.command("ping", (ctx) => ctx.reply("pong ✅"));
+bot.command("ping", (ctx) => ctx.reply(withMention(ctx, "pong ✅")));
 
 // /result <number>
 bot.command("result", async (ctx) => {
@@ -84,15 +84,15 @@ bot.command("result", async (ctx) => {
   const text = ctx.message?.text ?? "";
   const arg = text.split(" ").slice(1).join(" ").trim();
 
-  if (!arg) return ctx.reply("Usage: /result <number>\nExample: /result 21");
+  if (!arg) return ctx.reply(withMention(ctx, "Usage: /result <number>\nExample: /result 21"));
 
   const n = Number(arg);
-  if (Number.isNaN(n)) return ctx.reply(`"${arg}" is not a number.`);
+  if (Number.isNaN(n)) return ctx.reply(withMention(ctx, `"${arg}" is not a number.`));
 
   // Your real business logic goes here
   const result = n * 2;
 
-  await ctx.reply(`Result: ${result}`);
+  await ctx.reply(withMention(ctx, `Result: ${result}`));
 });
 
 // /menu with inline buttons
@@ -105,7 +105,7 @@ bot.command("menu", async (ctx) => {
     .row()
     .text("Help", "help");
 
-  await ctx.reply("Choose an action:", { reply_markup: kb });
+  await ctx.reply(withMention(ctx, "Choose an action:"), { reply_markup: kb });
 });
 
 // Button callbacks
@@ -114,12 +114,12 @@ bot.callbackQuery(/^double:(\d+)$/, async (ctx) => {
   const result = num * 2;
 
   await ctx.answerCallbackQuery();
-  await ctx.reply(`Result: ${result}`);
+  await ctx.reply(withMention(ctx, `Result: ${result}`));
 });
 
 bot.callbackQuery("help", async (ctx) => {
   await ctx.answerCallbackQuery();
-  await ctx.reply("Try /result 21 or /menu");
+  await ctx.reply(withMention(ctx, "Try /result 21 or /menu"));
 });
 
 const replyKeyboard = new Keyboard()
@@ -134,6 +134,10 @@ function mentionUser(ctx) {
   if (ctx.from?.username) return `@${ctx.from.username}`;
   const name = `${ctx.from?.first_name ?? ""} ${ctx.from?.last_name ?? ""}`.trim();
   return name || "User";
+}
+
+function withMention(ctx, message) {
+  return `${mentionUser(ctx)} ${message}`;
 }
 
 async function ensureDb() {
@@ -474,17 +478,16 @@ async function ensureBalanceAdmin(ctx) {
   const chatId = ctx.chat?.id;
   const userId = ctx.from?.id;
   if (!chatId || !userId) {
-    await ctx.reply("Missing chat or user info.");
+    await ctx.reply(withMention(ctx, "Missing chat or user info."));
     return false;
   }
   const admin = await getBalanceAdmin(chatId);
   if (!admin?.user_id) {
-    await ctx.reply("Balance admin not set. Use /setbalanceadmin as a chat admin.");
+    await ctx.reply(withMention(ctx, "Balance admin not set. Use /setbalanceadmin as a chat admin."));
     return false;
   }
   if (String(admin.user_id) !== String(userId)) {
-    const who = mentionUser(ctx);
-    await ctx.reply(`${who} Only the balance admin can update balances.`);
+    await ctx.reply(withMention(ctx, "Only the balance admin can update balances."));
     return false;
   }
   return true;
@@ -510,7 +513,7 @@ function buildReportLines(events, { limit, entryFormatter, style = "pretty" } = 
   return { lines, total };
 }
 
-async function sendReport(ctx, { limit, asPdf } = {}) {
+async function sendReport(ctx, { limit, asPdf, mentionPrefix } = {}) {
   if (!ensureGroup(ctx)) return;
   const chatId = ctx.chat?.id;
   const events = await fetchBalanceEvents(chatId);
@@ -522,11 +525,14 @@ async function sendReport(ctx, { limit, asPdf } = {}) {
   });
   if (asPdf) {
     const buffer = await renderReportPdf(events);
-    await ctx.replyWithDocument(new InputFile(buffer, "report.pdf"));
+    await ctx.replyWithDocument(new InputFile(buffer, "report.pdf"), {
+      caption: mentionPrefix ? withMention(ctx, mentionPrefix) : undefined,
+    });
     return;
   }
   const text = lines.join("\n");
-  const html = `<pre><b>${escapeHtml(text)}</b></pre>`;
+  const prefix = mentionPrefix ? `${withMention(ctx, mentionPrefix)}\n` : "";
+  const html = `<pre><b>${escapeHtml(prefix + text)}</b></pre>`;
   await ctx.reply(html, { reply_markup: replyKeyboard, parse_mode: "HTML" });
 }
 
@@ -544,7 +550,7 @@ bot.hears("📄 Report PDF by Date", async (ctx) => {
   if (chatId && userId) {
     pdfDateRequests.set(`${chatId}:${userId}`, Date.now());
   }
-  await ctx.reply("Send the date as DDMMYYYY (example: 27122025)");
+  await ctx.reply(withMention(ctx, "Send the date as DDMMYYYY (example: 27122025)"));
 });
 
 bot.on("message:text", async (ctx, next) => {
@@ -563,7 +569,7 @@ bot.on("message:text", async (ctx, next) => {
   if (text.startsWith("/")) return next();
   const range = buildDateRangeFromDDMMYYYY(text);
   if (!range) {
-    await ctx.reply("Invalid date. Use DDMMYYYY (example: 27122025).");
+    await ctx.reply(withMention(ctx, "Invalid date. Use DDMMYYYY (example: 27122025)."));
     return;
   }
   pdfDateRequests.delete(key);
@@ -572,17 +578,19 @@ bot.on("message:text", async (ctx, next) => {
     end: range.end,
   });
   if (!events.length) {
-    await ctx.reply("No entries for that date.");
+    await ctx.reply(withMention(ctx, "No entries for that date."));
     return;
   }
   const buffer = await renderReportPdf(events);
-  await ctx.replyWithDocument(new InputFile(buffer, `report-${range.label}.pdf`));
+  await ctx.replyWithDocument(new InputFile(buffer, `report-${range.label}.pdf`), {
+    caption: withMention(ctx, `Report for ${formatDateDMY(range.start)}`),
+  });
 });
 
 
 bot.command("calculation", async (ctx) => {
   if (!ensureGroup(ctx)) return;
-  await ctx.reply("Tap a button to view the report:", {
+  await ctx.reply(withMention(ctx, "Tap a button to view the report:"), {
     reply_markup: replyKeyboard,
   });
 });
@@ -598,12 +606,12 @@ bot.command("setbalanceadmin", async (ctx) => {
     const isAdmin =
       member.status === "creator" || member.status === "administrator";
     if (!isAdmin) {
-      await ctx.reply("Only chat admins can set the balance admin.");
+      await ctx.reply(withMention(ctx, "Only chat admins can set the balance admin."));
       return;
     }
   } catch (err) {
     console.error("Failed to verify admin status", err);
-    await ctx.reply("Could not verify admin status. Please try again.");
+    await ctx.reply(withMention(ctx, "Could not verify admin status. Please try again."));
     return;
   }
 
@@ -620,7 +628,7 @@ bot.command("setbalanceadmin", async (ctx) => {
   const argId = arg && /^\d+$/.test(arg) ? Number(arg) : null;
   const targetId = target?.id ?? argId;
   if (!targetId) {
-    await ctx.reply("Reply to a user's message or use /setbalanceadmin <user_id>.");
+    await ctx.reply(withMention(ctx, "Reply to a user's message or use /setbalanceadmin <user_id>."));
     return;
   }
 
@@ -639,7 +647,7 @@ bot.command("setbalanceadmin", async (ctx) => {
     },
     { upsert: true }
   );
-  await ctx.reply(`Balance admin set to ${target?.username ?? targetId}.`);
+  await ctx.reply(withMention(ctx, `Balance admin set to ${target?.username ?? targetId}.`));
 });
 
 bot.command("pdf", async (ctx) => {
@@ -647,12 +655,12 @@ bot.command("pdf", async (ctx) => {
   const text = ctx.message?.text ?? "";
   const arg = text.split(" ").slice(1).join(" ").trim();
   if (!arg) {
-    await ctx.reply("Usage: /pdf DDMMYYYY (example: /pdf 27122025)");
+    await ctx.reply(withMention(ctx, "Usage: /pdf DDMMYYYY (example: /pdf 27122025)"));
     return;
   }
   const range = buildDateRangeFromDDMMYYYY(arg);
   if (!range) {
-    await ctx.reply("Invalid date. Use DDMMYYYY (example: /pdf 27122025).");
+    await ctx.reply(withMention(ctx, "Invalid date. Use DDMMYYYY (example: /pdf 27122025)."));
     return;
   }
   const chatId = ctx.chat?.id;
@@ -661,11 +669,13 @@ bot.command("pdf", async (ctx) => {
     end: range.end,
   });
   if (!events.length) {
-    await ctx.reply("No entries for that date.");
+    await ctx.reply(withMention(ctx, "No entries for that date."));
     return;
   }
   const buffer = await renderReportPdf(events);
-  await ctx.replyWithDocument(new InputFile(buffer, `report-${range.label}.pdf`));
+  await ctx.replyWithDocument(new InputFile(buffer, `report-${range.label}.pdf`), {
+    caption: withMention(ctx, `Report for ${formatDateDMY(range.start)}`),
+  });
 });
 
 bot.command("balance", async (ctx) => {
@@ -674,28 +684,28 @@ bot.command("balance", async (ctx) => {
   const text = ctx.message?.text ?? "";
   const arg = text.split(" ").slice(1).join(" ").trim();
   if (!arg) {
-    await ctx.reply("Usage: /balance +number or /balance -number (example: /balance +10000)");
+    await ctx.reply(withMention(ctx, "Usage: /balance +number or /balance -number (example: /balance +10000)"));
     return;
   }
   const match = arg.match(/^([+-]\d+(?:\.\d+)?)$/);
   if (!match) {
-    await ctx.reply("Please provide a signed number. Example: /balance +10000");
+    await ctx.reply(withMention(ctx, "Please provide a signed number. Example: /balance +10000"));
     return;
   }
 
   const delta = Number(match[1]);
   if (Number.isNaN(delta)) {
-    await ctx.reply("That number is not valid.");
+    await ctx.reply(withMention(ctx, "That number is not valid."));
     return;
   }
 
   try {
     const targetUser = resolveBalanceTarget(ctx);
     await updateUserBalance(ctx, delta, targetUser);
-    await sendReport(ctx, { limit: 6 });
+    await sendReport(ctx, { limit: 6, mentionPrefix: "Balance updated." });
   } catch (err) {
     console.error("Failed to update balance", err);
-    await ctx.reply("Could not update balance right now. Please try again.");
+    await ctx.reply(withMention(ctx, "Could not update balance right now. Please try again."));
   }
 });
 
@@ -726,7 +736,7 @@ bot.on("message:text", async (ctx, next) => {
 
 // Calculation report
 bot.command("report", async (ctx) => {
-  await sendReport(ctx);
+  await sendReport(ctx, { mentionPrefix: "Here is your report." });
 });
 
 // Start polling
