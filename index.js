@@ -136,6 +136,12 @@ function mentionUser(ctx) {
   return name || "User";
 }
 
+function mentionUserByUser(user) {
+  if (user?.username) return `@${user.username}`;
+  const name = `${user?.first_name ?? ""} ${user?.last_name ?? ""}`.trim();
+  return name || "User";
+}
+
 function withMention(ctx, message) {
   return `${mentionUser(ctx)} ${message}`;
 }
@@ -567,6 +573,7 @@ bot.on("message:text", async (ctx, next) => {
 
   const text = ctx.message.text.trim();
   if (text.startsWith("/")) return next();
+  if (text === "*" || text === "**") return next();
   const range = buildDateRangeFromDDMMYYYY(text);
   if (!range) {
     await ctx.reply(withMention(ctx, "Invalid date. Use DDMMYYYY (example: 27122025)."));
@@ -707,6 +714,24 @@ bot.command("balance", async (ctx) => {
     console.error("Failed to update balance", err);
     await ctx.reply(withMention(ctx, "Could not update balance right now. Please try again."));
   }
+});
+
+bot.on("message:text", async (ctx, next) => {
+  const text = ctx.message.text.trim();
+  if (text.startsWith("/")) return next();
+  if (text !== "*" && text !== "**") return next();
+  if (!ensureGroup(ctx)) return;
+  if (!(await ensureBalanceAdmin(ctx))) return;
+  const target = ctx.message.reply_to_message?.from;
+  if (!target?.id) {
+    await ctx.reply(withMention(ctx, "Reply to a member's message with * or **."));
+    return;
+  }
+  const notice =
+    text === "**"
+      ? "⚠️ This payment has not yet received."
+      : "⚠️ This transaction has failed.";
+  await ctx.reply(`${mentionUserByUser(target)} ${notice}`);
 });
 
 // Balance adjustments: +number or -number (requires privacy mode disabled)
