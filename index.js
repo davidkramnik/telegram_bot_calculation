@@ -328,6 +328,9 @@ async function buildPdfHtml(events, { useTemplate = false } = {}) {
   const total = events.reduce((sum, e) => sum + (Number(e.delta) || 0), 0);
   const reportDate = formatDateDMY(new Date());
   const logoPath = path.join(process.cwd(), "backgroundlogo.jpg");
+  const templateMargins = useTemplate
+    ? "120px 48px 60px 96px"
+    : "24px";
   const rows = events
     .map((e) => {
       const member = escapeHtml(displayMemberId(e));
@@ -380,7 +383,7 @@ async function buildPdfHtml(events, { useTemplate = false } = {}) {
         font-family: "Courier New", Courier, monospace;
         font-size: 12px;
         font-weight: 700;
-        margin: 24px;
+        margin: ${templateMargins};
         color: #222;
         background: ${useTemplate ? "transparent" : "#fff"};
       }
