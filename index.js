@@ -2,6 +2,7 @@ import "dotenv/config";
 import { Bot, Keyboard, InlineKeyboard, InputFile } from "grammy";
 import { MongoClient } from "mongodb";
 import { chromium } from "playwright";
+import { PDFDocument } from "pdf-lib";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -323,7 +324,7 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-async function buildPdfHtml(events) {
+async function buildPdfHtml(events, { useTemplate = false } = {}) {
   const total = events.reduce((sum, e) => sum + (Number(e.delta) || 0), 0);
   const reportDate = formatDateDMY(new Date());
   const logoPath = path.join(process.cwd(), "backgroundlogo.jpg");
@@ -381,7 +382,7 @@ async function buildPdfHtml(events) {
         font-weight: 700;
         margin: 24px;
         color: #222;
-        background: #fff;
+        background: ${useTemplate ? "transparent" : "#fff"};
       }
       * {
         font-weight: 700;
@@ -390,7 +391,11 @@ async function buildPdfHtml(events) {
         content: "";
         position: fixed;
         inset: 0;
-        background: ${logoDataUri ? `url("${logoDataUri}") center/80% no-repeat` : "none"};
+        background: ${
+          !useTemplate && logoDataUri
+            ? `url("${logoDataUri}") center/80% no-repeat`
+            : "none"
+        };
         opacity: 0.2;
         z-index: -1;
       }
@@ -452,11 +457,40 @@ async function buildPdfHtml(events) {
 async function renderReportPdf(events) {
   const browser = await chromium.launch();
   const page = await browser.newPage();
-  const html = await buildPdfHtml(events);
+  const html = await buildPdfHtml(events, { useTemplate: true });
   await page.setContent(html, { waitUntil: "networkidle" });
-  const buffer = await page.pdf({ format: "A4", printBackground: true });
+  const buffer = await page.pdf({
+    format: "A4",
+    printBackground: true,
+    omitBackground: true,
+  });
   await browser.close();
-  return buffer;
+  const templatePath = path.join(process.cwd(), "report_template.pdf");
+  let templateBuffer;
+  try {
+    templateBuffer = await fs.readFile(templatePath);
+  } catch (err) {
+    console.warn("Template PDF not found, using default report PDF.", err);
+    return buffer;
+  }
+
+  const templateDoc = await PDFDocument.load(templateBuffer);
+  const contentDoc = await PDFDocument.load(buffer);
+  const outputDoc = await PDFDocument.create();
+  const templatePageCount = templateDoc.getPageCount();
+  const contentPageCount = contentDoc.getPageCount();
+  if (!templatePageCount) return buffer;
+
+  for (let i = 0; i < contentPageCount; i += 1) {
+    const templateIndex = Math.min(i, templatePageCount - 1);
+    const [templatePage] = await outputDoc.copyPages(templateDoc, [templateIndex]);
+    const [contentPage] = await outputDoc.copyPages(contentDoc, [i]);
+    const outputPage = outputDoc.addPage(templatePage);
+    const { width, height } = outputPage.getSize();
+    outputPage.drawPage(contentPage, { x: 0, y: 0, width, height });
+  }
+
+  return Buffer.from(await outputDoc.save());
 }
 
 
