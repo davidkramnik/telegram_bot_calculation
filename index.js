@@ -434,10 +434,13 @@ async function buildPdfHtml(events, { useTemplate = false } = {}) {
         margin: 0;
       }
       .title-row {
-        display: flex;
-        justify-content: space-between;
+        display: grid;
+        grid-template-columns: 1fr auto 1fr;
         align-items: center;
         margin: 0 0 6px 0;
+      }
+      .title-row .date {
+        justify-self: center;
       }
       .total {
         font-family: "NotoColorEmoji", "Courier New", monospace;
@@ -454,6 +457,7 @@ async function buildPdfHtml(events, { useTemplate = false } = {}) {
     <div class="title-row">
       <span class="title">📊 TRANSACTION LOG</span>
       <span class="date">📅 ${escapeHtml(reportDate)}</span>
+      <span></span>
     </div>
     <div class="separator"></div>
     ${rows}
