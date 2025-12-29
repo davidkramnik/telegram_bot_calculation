@@ -363,13 +363,13 @@ async function buildPdfHtml(events, { useTemplate = false } = {}) {
     .join("");
 
   const emojiFontPath = path.join(process.cwd(), "fonts", "NotoColorEmoji-Regular.ttf");
-  const textFontPath = path.join(process.cwd(), "fonts", "Roboto-Regular.ttf");
+  const textFontPath = path.join(process.cwd(), "fonts", "Roboto-ExtraBold.ttf");
   const emojiFontCss = `@font-face { font-family: "NotoColorEmoji"; src: url("file://${emojiFontPath}"); }`;
-  let textFontCss = `@font-face { font-family: "RobotoRegular"; src: url("file://${textFontPath}"); font-weight: 400; font-style: normal; }`;
+  let textFontCss = `@font-face { font-family: "RobotoExtraBold"; src: url("file://${textFontPath}"); font-weight: 800; font-style: normal; }`;
   try {
     const textFontBuffer = await fs.readFile(textFontPath);
     const textFontData = textFontBuffer.toString("base64");
-    textFontCss = `@font-face { font-family: "RobotoRegular"; src: url("data:font/ttf;base64,${textFontData}") format("truetype"); font-weight: 400; font-style: normal; }`;
+    textFontCss = `@font-face { font-family: "RobotoExtraBold"; src: url("data:font/ttf;base64,${textFontData}") format("truetype"); font-weight: 800; font-style: normal; }`;
   } catch {
     // Fall back to file path if embedding fails.
   }
@@ -390,9 +390,9 @@ async function buildPdfHtml(events, { useTemplate = false } = {}) {
       ${emojiFontCss}
       ${textFontCss}
       body {
-        font-family: "RobotoRegular", "NotoColorEmoji", sans-serif;
+        font-family: "RobotoExtraBold", "NotoColorEmoji", sans-serif;
         font-size: 12px;
-        font-weight: 700;
+        font-weight: 800;
         margin: ${templateMargins};
         color: #222;
         background: ${useTemplate ? "transparent" : "#fff"};
@@ -401,7 +401,7 @@ async function buildPdfHtml(events, { useTemplate = false } = {}) {
         font-kerning: normal;
       }
       * {
-        font-weight: 500;
+        font-weight: 800;
       }
       body::before {
         content: "";
