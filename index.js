@@ -363,7 +363,9 @@ async function buildPdfHtml(events, { useTemplate = false } = {}) {
     .join("");
 
   const emojiFontPath = path.join(process.cwd(), "fonts", "NotoColorEmoji-Regular.ttf");
+  const textFontPath = path.join(process.cwd(), "fonts", "Roboto-Regular.ttf");
   const emojiFontCss = `@font-face { font-family: "NotoColorEmoji"; src: url("file://${emojiFontPath}"); }`;
+  const textFontCss = `@font-face { font-family: "RobotoRegular"; src: url("file://${textFontPath}"); font-weight: 400; font-style: normal; }`;
 
   let logoDataUri = "";
   try {
@@ -379,8 +381,9 @@ async function buildPdfHtml(events, { useTemplate = false } = {}) {
     <meta charset="utf-8" />
     <style>
       ${emojiFontCss}
+      ${textFontCss}
       body {
-        font-family: "Courier New", Courier, monospace;
+        font-family: "RobotoRegular", "NotoColorEmoji", sans-serif;
         font-size: 12px;
         font-weight: 700;
         margin: ${templateMargins};
@@ -388,7 +391,7 @@ async function buildPdfHtml(events, { useTemplate = false } = {}) {
         background: ${useTemplate ? "transparent" : "#fff"};
       }
       * {
-        font-weight: 700;
+        font-weight: 400;
       }
       body::before {
         content: "";
