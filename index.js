@@ -365,7 +365,14 @@ async function buildPdfHtml(events, { useTemplate = false } = {}) {
   const emojiFontPath = path.join(process.cwd(), "fonts", "NotoColorEmoji-Regular.ttf");
   const textFontPath = path.join(process.cwd(), "fonts", "Roboto-Regular.ttf");
   const emojiFontCss = `@font-face { font-family: "NotoColorEmoji"; src: url("file://${emojiFontPath}"); }`;
-  const textFontCss = `@font-face { font-family: "RobotoRegular"; src: url("file://${textFontPath}"); font-weight: 400; font-style: normal; }`;
+  let textFontCss = `@font-face { font-family: "RobotoRegular"; src: url("file://${textFontPath}"); font-weight: 400; font-style: normal; }`;
+  try {
+    const textFontBuffer = await fs.readFile(textFontPath);
+    const textFontData = textFontBuffer.toString("base64");
+    textFontCss = `@font-face { font-family: "RobotoRegular"; src: url("data:font/ttf;base64,${textFontData}") format("truetype"); font-weight: 400; font-style: normal; }`;
+  } catch {
+    // Fall back to file path if embedding fails.
+  }
 
   let logoDataUri = "";
   try {
@@ -389,6 +396,9 @@ async function buildPdfHtml(events, { useTemplate = false } = {}) {
         margin: ${templateMargins};
         color: #222;
         background: ${useTemplate ? "transparent" : "#fff"};
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+        font-kerning: normal;
       }
       * {
         font-weight: 500;
