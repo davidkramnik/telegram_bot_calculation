@@ -329,7 +329,7 @@ async function buildPdfHtml(events, { useTemplate = false } = {}) {
   const reportDate = formatDateDMY(new Date());
   const logoPath = path.join(process.cwd(), "backgroundlogo.jpg");
   const templateMargins = useTemplate
-    ? "160px 48px 60px 48px"
+    ? "160px 48px 60px 68px"
     : "24px";
   const rows = events
     .map((e) => {
