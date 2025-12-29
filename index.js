@@ -391,7 +391,7 @@ async function buildPdfHtml(events, { useTemplate = false } = {}) {
         background: ${useTemplate ? "transparent" : "#fff"};
       }
       * {
-        font-weight: 400;
+        font-weight: 500;
       }
       body::before {
         content: "";
