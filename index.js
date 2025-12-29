@@ -243,16 +243,48 @@ function parseDDMMYYYY(value) {
   return { day, month, year };
 }
 
-function dateInTimezone(year, month, day) {
-  const utcDate = new Date(Date.UTC(year, month - 1, day, 0, 0, 0));
-  return new Date(utcDate.toLocaleString("en-US", { timeZone: TIMEZONE }));
+function getTimeZoneOffset(date, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const values = {};
+  for (const part of parts) {
+    if (part.type !== "literal") values[part.type] = part.value;
+  }
+  const asUtc = Date.UTC(
+    Number(values.year),
+    Number(values.month) - 1,
+    Number(values.day),
+    Number(values.hour),
+    Number(values.minute),
+    Number(values.second)
+  );
+  return asUtc - date.getTime();
+}
+
+function makeZonedDate(year, month, day, hour = 0, minute = 0, second = 0) {
+  const utcGuess = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  let offsetMs = getTimeZoneOffset(utcGuess, TIMEZONE);
+  let zoned = new Date(utcGuess.getTime() - offsetMs);
+  const offsetMs2 = getTimeZoneOffset(zoned, TIMEZONE);
+  if (offsetMs2 !== offsetMs) {
+    zoned = new Date(utcGuess.getTime() - offsetMs2);
+  }
+  return zoned;
 }
 
 function buildDateRangeFromDDMMYYYY(value) {
   const parsed = parseDDMMYYYY(value);
   if (!parsed) return null;
-  const start = dateInTimezone(parsed.year, parsed.month, parsed.day);
-  const end = dateInTimezone(parsed.year, parsed.month, parsed.day + 1);
+  const start = makeZonedDate(parsed.year, parsed.month, parsed.day);
+  const end = makeZonedDate(parsed.year, parsed.month, parsed.day + 1);
   return {
     start,
     end,
