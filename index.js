@@ -256,6 +256,20 @@ function buildDateRangeFromDDMMYYYY(value) {
   };
 }
 
+function getTodayLabelInTimezone() {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: TIMEZONE,
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).formatToParts(new Date());
+  const values = {};
+  for (const part of parts) {
+    if (part.type !== "literal") values[part.type] = part.value;
+  }
+  return `${values.day}${values.month}${values.year}`;
+}
+
 async function fetchBalanceEvents(chatId, { start, end, dayLabel } = {}) {
   const { balanceEvents } = await ensureDb();
   if (dayLabel) {
@@ -538,7 +552,8 @@ function buildReportLines(events, { limit, entryFormatter, style = "pretty" } = 
 async function sendReport(ctx, { limit, asPdf, mentionPrefix } = {}) {
   if (!ensureGroup(ctx)) return;
   const chatId = ctx.chat?.id;
-  const events = await fetchBalanceEvents(chatId);
+  const todayLabel = getTodayLabelInTimezone();
+  const events = await fetchBalanceEvents(chatId, { dayLabel: todayLabel });
 
   const { lines } = buildReportLines(events, {
     limit,
