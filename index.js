@@ -243,57 +243,41 @@ function parseDDMMYYYY(value) {
   return { day, month, year };
 }
 
-function getTimeZoneOffset(date, timeZone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).formatToParts(date);
-  const values = {};
-  for (const part of parts) {
-    if (part.type !== "literal") values[part.type] = part.value;
-  }
-  const asUtc = Date.UTC(
-    Number(values.year),
-    Number(values.month) - 1,
-    Number(values.day),
-    Number(values.hour),
-    Number(values.minute),
-    Number(values.second)
-  );
-  return asUtc - date.getTime();
-}
-
-function makeZonedDate(year, month, day, hour = 0, minute = 0, second = 0) {
-  const utcGuess = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
-  let offsetMs = getTimeZoneOffset(utcGuess, TIMEZONE);
-  let zoned = new Date(utcGuess.getTime() - offsetMs);
-  const offsetMs2 = getTimeZoneOffset(zoned, TIMEZONE);
-  if (offsetMs2 !== offsetMs) {
-    zoned = new Date(utcGuess.getTime() - offsetMs2);
-  }
-  return zoned;
-}
-
 function buildDateRangeFromDDMMYYYY(value) {
   const parsed = parseDDMMYYYY(value);
   if (!parsed) return null;
-  const start = makeZonedDate(parsed.year, parsed.month, parsed.day);
-  const end = makeZonedDate(parsed.year, parsed.month, parsed.day + 1);
+  const display = `${String(parsed.day).padStart(2, "0")}/${String(parsed.month).padStart(
+    2,
+    "0"
+  )}/${parsed.year}`;
   return {
-    start,
-    end,
+    display,
     label: `${parsed.day}${String(parsed.month).padStart(2, "0")}${parsed.year}`,
   };
 }
 
-async function fetchBalanceEvents(chatId, { start, end } = {}) {
+async function fetchBalanceEvents(chatId, { start, end, dayLabel } = {}) {
   const { balanceEvents } = await ensureDb();
+  if (dayLabel) {
+    return balanceEvents
+      .aggregate([
+        { $match: { chat_id: chatId } },
+        {
+          $addFields: {
+            day_label: {
+              $dateToString: {
+                format: "%d%m%Y",
+                date: "$timestamp",
+                timezone: TIMEZONE,
+              },
+            },
+          },
+        },
+        { $match: { day_label: dayLabel } },
+        { $sort: { timestamp: 1 } },
+      ])
+      .toArray();
+  }
   const query = { chat_id: chatId };
   if (start || end) {
     query.timestamp = {};
@@ -613,8 +597,7 @@ bot.on("message:text", async (ctx, next) => {
   }
   pdfDateRequests.delete(key);
   const events = await fetchBalanceEvents(chatId, {
-    start: range.start,
-    end: range.end,
+    dayLabel: range.label,
   });
   if (!events.length) {
     await ctx.reply(withMention(ctx, "No entries for that date."));
@@ -622,7 +605,7 @@ bot.on("message:text", async (ctx, next) => {
   }
   const buffer = await renderReportPdf(events);
   await ctx.replyWithDocument(new InputFile(buffer, `report-${range.label}.pdf`), {
-    caption: withMention(ctx, `Report for ${formatDateDMY(range.start)}`),
+    caption: withMention(ctx, `Report for ${range.display}`),
   });
 });
 
@@ -704,8 +687,7 @@ bot.command("pdf", async (ctx) => {
   }
   const chatId = ctx.chat?.id;
   const events = await fetchBalanceEvents(chatId, {
-    start: range.start,
-    end: range.end,
+    dayLabel: range.label,
   });
   if (!events.length) {
     await ctx.reply(withMention(ctx, "No entries for that date."));
@@ -713,7 +695,7 @@ bot.command("pdf", async (ctx) => {
   }
   const buffer = await renderReportPdf(events);
   await ctx.replyWithDocument(new InputFile(buffer, `report-${range.label}.pdf`), {
-    caption: withMention(ctx, `Report for ${formatDateDMY(range.start)}`),
+    caption: withMention(ctx, `Report for ${range.display}`),
   });
 });
 
