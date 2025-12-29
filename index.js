@@ -729,9 +729,9 @@ bot.on("message:text", async (ctx, next) => {
   }
   const notice =
     text === "**"
-      ? "⚠️ This payment has not yet received."
-      : "⚠️ This transaction has failed.";
-  await ctx.reply(`${mentionUserByUser(target)} ${notice}`);
+      ? "<b>⚠️ This payment has not yet received.</b>"
+      : "<b>⚠️ This transaction has failed.</b>";
+  await ctx.reply(`${mentionUserByUser(target)} ${notice}`, { parse_mode: "HTML" });
 });
 
 // Balance adjustments: +number or -number (requires privacy mode disabled)
