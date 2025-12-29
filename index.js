@@ -487,7 +487,8 @@ async function renderReportPdf(events) {
     const [contentPage] = await outputDoc.copyPages(contentDoc, [i]);
     const outputPage = outputDoc.addPage(templatePage);
     const { width, height } = outputPage.getSize();
-    outputPage.drawPage(contentPage, { x: 0, y: 0, width, height });
+    const embeddedContent = await outputDoc.embedPage(contentPage);
+    outputPage.drawPage(embeddedContent, { x: 0, y: 0, width, height });
   }
 
   return Buffer.from(await outputDoc.save());
