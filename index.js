@@ -328,7 +328,7 @@ async function buildPdfHtml(events, { useTemplate = false } = {}) {
   const total = events.reduce((sum, e) => sum + (Number(e.delta) || 0), 0);
   const reportDate = formatDateDMY(new Date());
   const logoPath = path.join(process.cwd(), "backgroundlogo.jpg");
-  const templateMargins = useTemplate
+  const pageMargins = useTemplate
     ? "160px 93px 60px 78px"
     : "24px";
   const rows = events
@@ -389,11 +389,14 @@ async function buildPdfHtml(events, { useTemplate = false } = {}) {
     <style>
       ${emojiFontCss}
       ${textFontCss}
+      @page {
+        margin: ${pageMargins};
+      }
       body {
         font-family: "RobotoExtraBold", "NotoColorEmoji", sans-serif;
         font-size: 12px;
         font-weight: 800;
-        margin: ${templateMargins};
+        margin: 0;
         color: #222;
         background: ${useTemplate ? "transparent" : "#fff"};
         -webkit-font-smoothing: antialiased;
@@ -420,6 +423,7 @@ async function buildPdfHtml(events, { useTemplate = false } = {}) {
         grid-template-columns: 120px 120px 120px;
         column-gap: 12px;
         line-height: 1.3;
+        break-inside: avoid;
       }
       .member {
         white-space: nowrap;
