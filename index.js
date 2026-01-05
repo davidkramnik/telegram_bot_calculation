@@ -253,7 +253,7 @@ function buildDateRangeFromDDMMYYYY(value) {
   )}/${parsed.year}`;
   return {
     display,
-    label: `${parsed.day}${String(parsed.month).padStart(2, "0")}${parsed.year}`,
+    label: `${String(parsed.day).padStart(2, "0")}${String(parsed.month).padStart(2, "0")}${parsed.year}`,
   };
 }
 
