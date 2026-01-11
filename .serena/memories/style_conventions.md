@@ -1,0 +1,1 @@
+Code style: JavaScript (ESM) with 2-space indentation. Use camelCase for variables/functions and SCREAMING_SNAKE_CASE for constants. Prefer short, descriptive handler names (e.g., `handleCalculation`, `buildTodayReportForUser`). Keep bot replies concise and consistent with existing wording.

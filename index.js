@@ -613,6 +613,9 @@ function buildReportLines(events, { limit, entryFormatter, style = "pretty" } = 
     lines.push(formatEntry(e));
   }
   lines.push(separator, `${totalLabel} ${totalValue}`);
+  if (style === "pretty") {
+    lines.push("", "🎉 2nd Anniversary 🐲", "Together we grow, Stronger every day.");
+  }
   return { lines, total };
 }
 
@@ -634,10 +637,9 @@ async function sendReport(ctx, { limit, asPdf, mentionPrefix } = {}) {
     });
     return;
   }
-  const text = lines.join("\n");
   const prefix = mentionPrefix ? `${withMention(ctx, mentionPrefix)}\n` : "";
-  const html = `<pre><b>${escapeHtml(prefix + text)}</b></pre>`;
-  await ctx.reply(html, { reply_markup: replyKeyboard, parse_mode: "HTML" });
+  const text = `${prefix}${lines.join("\n")}`;
+  await ctx.reply(text, { reply_markup: replyKeyboard });
 }
 
 bot.hears(["View Report", "Vew Report", "🌐 Full Report"], async (ctx) => {

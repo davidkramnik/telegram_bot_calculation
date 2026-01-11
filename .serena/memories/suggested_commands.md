@@ -1,0 +1,5 @@
+- `npm install` to install dependencies
+- `node index.js` to start the bot (polling mode)
+- `npm test` (currently a placeholder that exits with error)
+- `rg` or `rg --files` for fast search
+- `ls`, `git status` for repo navigation/checks

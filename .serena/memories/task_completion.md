@@ -1,0 +1,1 @@
+When finishing a change: review bot reply text for consistency, run `npm test` only if you updated tests (it currently fails by design), and mention any behavior or config changes (including .env additions) in your summary. If you add tests, use a Node.js test runner and name files `*.test.js`, and update `package.json` with how to run them.
