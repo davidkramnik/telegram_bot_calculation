@@ -643,7 +643,7 @@ async function sendReport(ctx, { limit, asPdf, mentionPrefix } = {}) {
   }
   const prefix = mentionPrefix ? `${withMention(ctx, mentionPrefix)}\n` : "";
   const text = `${prefix}${lines.join("\n")}`;
-  const formatted = `***${escapeMarkdownV2(text)}***`;
+  const formatted = `_*${escapeMarkdownV2(text)}*_`;
   await ctx.reply(formatted, {
     reply_markup: replyKeyboard,
     parse_mode: "MarkdownV2",
