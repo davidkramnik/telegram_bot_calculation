@@ -324,6 +324,10 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+function escapeMarkdownV2(value) {
+  return String(value).replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, "\\$1");
+}
+
 async function buildPdfHtml(events, { useTemplate = false } = {}) {
   const total = events.reduce((sum, e) => sum + (Number(e.delta) || 0), 0);
   const reportDate = formatDateDMY(new Date());
@@ -639,7 +643,11 @@ async function sendReport(ctx, { limit, asPdf, mentionPrefix } = {}) {
   }
   const prefix = mentionPrefix ? `${withMention(ctx, mentionPrefix)}\n` : "";
   const text = `${prefix}${lines.join("\n")}`;
-  await ctx.reply(text, { reply_markup: replyKeyboard });
+  const formatted = `***${escapeMarkdownV2(text)}***`;
+  await ctx.reply(formatted, {
+    reply_markup: replyKeyboard,
+    parse_mode: "MarkdownV2",
+  });
 }
 
 bot.hears(["View Report", "Vew Report", "🌐 Full Report"], async (ctx) => {
