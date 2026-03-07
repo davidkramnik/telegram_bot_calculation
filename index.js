@@ -618,7 +618,7 @@ function buildReportLines(events, { limit, entryFormatter, style = "pretty" } = 
   }
   lines.push(separator, `${totalLabel} ${totalValue}`);
   if (style === "pretty") {
-    lines.push("", "🎉 2nd Anniversary 🐲", "Together we grow, Stronger every day.");
+    lines.push("", "DRAGONTECH 🐲");
   }
   return { lines, total };
 }
